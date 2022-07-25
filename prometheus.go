@@ -26,7 +26,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
@@ -51,11 +53,13 @@ type options struct {
 }
 
 type Output struct {
-	*internal.PrometheusAdapter
+	output.SampleBuffer
+	adapter *internal.PrometheusAdapter
 
-	addr   string
-	arg    string
-	logger logrus.FieldLogger
+	addr    string
+	arg     string
+	logger  logrus.FieldLogger
+	flusher *output.PeriodicFlusher
 }
 
 func New(params output.Params) (output.Output, error) {
@@ -65,9 +69,9 @@ func New(params output.Params) (output.Output, error) {
 	}
 
 	o := &Output{
-		PrometheusAdapter: internal.NewPrometheusAdapter(registry, params.Logger, "", ""),
-		arg:               params.ConfigArgument,
-		logger:            params.Logger,
+		adapter: internal.NewPrometheusAdapter(registry, params.Logger, "", ""),
+		arg:     params.ConfigArgument,
+		logger:  params.Logger,
 	}
 
 	return o, nil
@@ -103,14 +107,27 @@ func getopts(qs string) (*options, error) {
 	return opts, nil
 }
 
+func (o *Output) flush() {
+	t := time.Now()
+	buff := o.SampleBuffer.GetBufferedSamples()
+	o.adapter.AddMetricSamples(buff)
+	d := time.Since(t)
+	if d > time.Second {
+		o.logger.
+			WithField("flush_duration", d.String()).
+			WithField("sample_count", len(buff)).
+			Warn("flush took more than 1s")
+	}
+}
+
 func (o *Output) Start() error {
 	opts, err := getopts(o.arg)
 	if err != nil {
 		return err
 	}
 
-	o.Namespace = opts.Namespace
-	o.Subsystem = opts.Subsystem
+	o.adapter.Namespace = opts.Namespace
+	o.adapter.Subsystem = opts.Subsystem
 	o.addr = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
 
 	listener, err := net.Listen("tcp", o.addr)
@@ -118,15 +135,34 @@ func (o *Output) Start() error {
 		return err
 	}
 
+	mux := &http.ServeMux{}
+	mux.Handle("/", o.adapter.Handler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
 	go func() {
-		if err := http.Serve(listener, o.PrometheusAdapter.Handler()); err != nil {
+		// if err := http.Serve(listener, o.adapter.Handler()); err != nil {
+		if err := http.Serve(listener, mux); err != nil {
 			o.logger.Error(err)
 		}
 	}()
+
+	flusher, err := output.NewPeriodicFlusher(time.Second, o.flush)
+	if err != nil {
+		return err
+	}
+	o.flusher = flusher
 
 	return nil
 }
 
 func (o *Output) Stop() error {
+	if o.flusher != nil {
+		o.flusher.Stop()
+		o.flusher = nil
+	}
 	return nil
 }

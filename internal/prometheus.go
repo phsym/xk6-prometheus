@@ -73,10 +73,13 @@ func NewPrometheusAdapter(registry *prometheus.Registry, logger logrus.FieldLogg
 }
 
 func (a *PrometheusAdapter) AddMetricSamples(samples []metrics.SampleContainer) {
-	for i := range samples {
-		all := samples[i].GetSamples()
-		for j := range all {
-			a.handleSample(&all[j])
+	for _, sample := range samples {
+		var tags map[string]string
+		if container, ok := sample.(metrics.ConnectedSampleContainer); ok {
+			tags = container.GetTags().CloneTags()
+		}
+		for _, smpl := range sample.GetSamples() {
+			a.handleSample(&smpl, tags)
 		}
 	}
 }
@@ -85,8 +88,12 @@ func (a *PrometheusAdapter) Handler() http.Handler {
 	return promhttp.HandlerFor(a.registry, promhttp.HandlerOpts{}) // nolint:exhaustivestruct
 }
 
-func (a *PrometheusAdapter) handleSample(sample *metrics.Sample) {
-	var handler func(*metrics.Sample)
+func (a *PrometheusAdapter) handleSample(sample *metrics.Sample, tags map[string]string) {
+	var handler func(*metrics.Sample, map[string]string)
+
+	if tags == nil {
+		tags = sample.Tags.CloneTags()
+	}
 
 	switch sample.Metric.Type {
 	case metrics.Counter:
@@ -103,34 +110,32 @@ func (a *PrometheusAdapter) handleSample(sample *metrics.Sample) {
 		return
 	}
 
-	handler(sample)
+	handler(sample, tags)
 }
 
-func (a *PrometheusAdapter) tagsToLabelNames(tags *metrics.SampleTags) []string {
-	m := tags.CloneTags()
-	keys := make([]string, 0, len(m))
-	for key := range m {
+func (a *PrometheusAdapter) tagsToLabelNames(tags map[string]string) []string {
+	keys := make([]string, 0, len(tags))
+	for key := range tags {
 		keys = append(keys, key)
 	}
 	return keys
 }
 
-func (a *PrometheusAdapter) tagsToLabelValues(labelNames []string, sampleTags *metrics.SampleTags) []string {
-	tags := sampleTags.CloneTags()
-	labelValues := []string{}
+func (a *PrometheusAdapter) tagsToLabelValues(labelNames []string, tags map[string]string) []string {
+	labelValues := make([]string, 0, len(labelNames))
 	for _, label := range labelNames {
 		labelValues = append(labelValues, tags[label])
-		delete(tags, label)
 	}
-	if len(tags) > 0 {
-		a.logger.WithField("unused_tags", tags).Warn("Not all tags used as labels")
+	if len(labelNames) < len(tags) {
+		// a.logger.WithField("unused_tags", tags).Warn("Not all tags used as labels")
+		a.logger.Warn("Not all tags used as labels")
 	}
 	return labelValues
 }
 
-func (a *PrometheusAdapter) handleCounter(sample *metrics.Sample) {
-	if counter := a.getCounter(sample.Metric.Name, "k6 counter", sample.Tags); counter != nil {
-		labelValues := a.tagsToLabelValues(counter.labelNames, sample.Tags)
+func (a *PrometheusAdapter) handleCounter(sample *metrics.Sample, tags map[string]string) {
+	if counter := a.getCounter(sample.Metric.Name, "k6 counter", tags); counter != nil {
+		labelValues := a.tagsToLabelValues(counter.labelNames, tags)
 		metric, err := counter.counterVec.GetMetricWithLabelValues(labelValues...)
 		if err != nil {
 			a.logger.Error(err)
@@ -140,9 +145,9 @@ func (a *PrometheusAdapter) handleCounter(sample *metrics.Sample) {
 	}
 }
 
-func (a *PrometheusAdapter) handleGauge(sample *metrics.Sample) {
-	if gauge := a.getGauge(sample.Metric.Name, "k6 gauge", sample.Tags); gauge != nil {
-		labelValues := a.tagsToLabelValues(gauge.labelNames, sample.Tags)
+func (a *PrometheusAdapter) handleGauge(sample *metrics.Sample, tags map[string]string) {
+	if gauge := a.getGauge(sample.Metric.Name, "k6 gauge", tags); gauge != nil {
+		labelValues := a.tagsToLabelValues(gauge.labelNames, tags)
 		metric, err := gauge.gaugeVec.GetMetricWithLabelValues(labelValues...)
 		if err != nil {
 			a.logger.Error(err)
@@ -152,9 +157,9 @@ func (a *PrometheusAdapter) handleGauge(sample *metrics.Sample) {
 	}
 }
 
-func (a *PrometheusAdapter) handleRate(sample *metrics.Sample) {
-	if histogram := a.getHistogram(sample.Metric.Name, "k6 rate", []float64{0}, sample.Tags); histogram != nil {
-		labelValues := a.tagsToLabelValues(histogram.labelNames, sample.Tags)
+func (a *PrometheusAdapter) handleRate(sample *metrics.Sample, tags map[string]string) {
+	if histogram := a.getHistogram(sample.Metric.Name, "k6 rate", tags); histogram != nil {
+		labelValues := a.tagsToLabelValues(histogram.labelNames, tags)
 		metric, err := histogram.histogramVec.GetMetricWithLabelValues(labelValues...)
 		if err != nil {
 			a.logger.Error(err)
@@ -164,10 +169,19 @@ func (a *PrometheusAdapter) handleRate(sample *metrics.Sample) {
 	}
 }
 
-func (a *PrometheusAdapter) handleTrend(sample *metrics.Sample) {
-	if summary := a.getSummary(sample.Metric.Name, "k6 trend", sample.Tags); summary != nil {
-		labelValues := a.tagsToLabelValues(summary.labelNames, sample.Tags)
-		metric, err := summary.summaryVec.GetMetricWithLabelValues(labelValues...)
+func (a *PrometheusAdapter) handleTrend(sample *metrics.Sample, tags map[string]string) {
+	// if summary := a.getSummary(sample.Metric.Name, "k6 trend", tags); summary != nil {
+	// 	labelValues := a.tagsToLabelValues(summary.labelNames, tags)
+	// 	metric, err := summary.summaryVec.GetMetricWithLabelValues(labelValues...)
+	// 	if err != nil {
+	// 		a.logger.Error(err)
+	// 	} else {
+	// 		metric.Observe(sample.Value)
+	// 	}
+	// }
+	if summary := a.getHistogram(sample.Metric.Name, "k6 trend", tags); summary != nil {
+		labelValues := a.tagsToLabelValues(summary.labelNames, tags)
+		metric, err := summary.histogramVec.GetMetricWithLabelValues(labelValues...)
 		if err != nil {
 			a.logger.Error(err)
 		} else {
@@ -175,8 +189,8 @@ func (a *PrometheusAdapter) handleTrend(sample *metrics.Sample) {
 		}
 	}
 
-	if gauge := a.getGauge(sample.Metric.Name+"_current", "k6 trend (current)", sample.Tags); gauge != nil {
-		labelValues := a.tagsToLabelValues(gauge.labelNames, sample.Tags)
+	if gauge := a.getGauge(sample.Metric.Name+"_current", "k6 trend (current)", tags); gauge != nil {
+		labelValues := a.tagsToLabelValues(gauge.labelNames, tags)
 		metric, err := gauge.gaugeVec.GetMetricWithLabelValues(labelValues...)
 		if err != nil {
 			a.logger.Error(err)
@@ -186,7 +200,7 @@ func (a *PrometheusAdapter) handleTrend(sample *metrics.Sample) {
 	}
 }
 
-func (a *PrometheusAdapter) getCounter(name string, helpSuffix string, tags *metrics.SampleTags) (counter *counterWithLabels) {
+func (a *PrometheusAdapter) getCounter(name string, helpSuffix string, tags map[string]string) (counter *counterWithLabels) {
 	if col, ok := a.metrics[name]; ok {
 		if c, tok := col.(*counterWithLabels); tok {
 			counter = c
@@ -219,7 +233,7 @@ func (a *PrometheusAdapter) getCounter(name string, helpSuffix string, tags *met
 	return counter
 }
 
-func (a *PrometheusAdapter) getGauge(name string, helpSuffix string, tags *metrics.SampleTags) (gauge *gaugeWithLabels) {
+func (a *PrometheusAdapter) getGauge(name string, helpSuffix string, tags map[string]string) (gauge *gaugeWithLabels) {
 	if gau, ok := a.metrics[name]; ok {
 		if g, tok := gau.(*gaugeWithLabels); tok {
 			gauge = g
@@ -252,7 +266,7 @@ func (a *PrometheusAdapter) getGauge(name string, helpSuffix string, tags *metri
 	return gauge
 }
 
-func (a *PrometheusAdapter) getSummary(name string, helpSuffix string, tags *metrics.SampleTags) (summary *summaryWithLabels) {
+func (a *PrometheusAdapter) getSummary(name string, helpSuffix string, tags map[string]string) (summary *summaryWithLabels) {
 	if sum, ok := a.metrics[name]; ok {
 		if s, tok := sum.(*summaryWithLabels); tok {
 			summary = s
@@ -286,7 +300,7 @@ func (a *PrometheusAdapter) getSummary(name string, helpSuffix string, tags *met
 	return summary
 }
 
-func (a *PrometheusAdapter) getHistogram(name string, helpSuffix string, buckets []float64, tags *metrics.SampleTags) (histogram *histogramWithLabels) {
+func (a *PrometheusAdapter) getHistogram(name string, helpSuffix string, tags map[string]string) (histogram *histogramWithLabels) {
 	if his, ok := a.metrics[name]; ok {
 		if h, tok := his.(*histogramWithLabels); tok {
 			histogram = h
@@ -303,7 +317,7 @@ func (a *PrometheusAdapter) getHistogram(name string, helpSuffix string, buckets
 				Subsystem: a.Subsystem,
 				Name:      name,
 				Help:      helpFor(name, helpSuffix),
-				Buckets:   buckets,
+				// Buckets:   buckets,
 			}, labelNames),
 			labelNames: labelNames,
 		}

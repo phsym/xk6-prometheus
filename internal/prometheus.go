@@ -91,6 +91,8 @@ func (a *PrometheusAdapter) Handler() http.Handler {
 func (a *PrometheusAdapter) handleSample(sample *metrics.Sample, tags map[string]string) {
 	var handler func(*metrics.Sample, map[string]string)
 
+	delete(tags, "url") // URL is too verbose, we must drop it to not kill prometheus server
+
 	if tags == nil {
 		tags = sample.Tags.CloneTags()
 	}

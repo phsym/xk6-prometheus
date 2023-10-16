@@ -76,7 +76,7 @@ func (a *PrometheusAdapter) AddMetricSamples(samples []metrics.SampleContainer) 
 	for _, sample := range samples {
 		var tags map[string]string
 		if container, ok := sample.(metrics.ConnectedSampleContainer); ok {
-			tags = container.GetTags().CloneTags()
+			tags = container.GetTags().Map()
 		}
 		for _, smpl := range sample.GetSamples() {
 			a.handleSample(&smpl, tags)
@@ -92,7 +92,7 @@ func (a *PrometheusAdapter) handleSample(sample *metrics.Sample, tags map[string
 	var handler func(*metrics.Sample, map[string]string)
 
 	if tags == nil {
-		tags = sample.Tags.CloneTags()
+		tags = sample.Tags.Map()
 	}
 	delete(tags, "url") // URL is too verbose, we must drop it to not kill prometheus server
 
